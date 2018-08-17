@@ -1,0 +1,172 @@
+import requests
+import json
+import math
+from urlparse import urlparse,urlunparse
+import urllib
+import time
+from bs4 import BeautifulSoup
+from cassandra.cluster import Cluster
+from cqlengine import columns,connection
+from cqlengine.models import Model
+from cqlengine.management import sync_table
+from datetime import datetime
+import sys
+
+class Events(Model):
+    eventid = columns.Text(primary_key=True)
+    url = columns.Text()
+    title = columns.Text()
+    description = columns.Text()
+    start_time = columns.DateTime()
+    stop_time = columns.DateTime()
+    venue_id = columns.Text()
+    venue_name = columns.Text()
+    venue_address = columns.Text()
+    city_name = columns.Text()
+    region_name = columns.Text()
+    postal_code = columns.Text()
+    country_name = columns.Text()
+    created = columns.DateTime()
+    modified = columns.DateTime()
+    links = columns.Map(columns.Text(),columns.Text())
+    categories = columns.Set(columns.Text())
+    tags = columns.Set(columns.Text())
+    images = columns.Set(columns.Text())
+    latitude = columns.Float()
+    longitude = columns.Float()
+    performers = columns.Set(columns.Text())
+
+    def __repr__(self):
+        return '%s %s'%(self.eventid,self.title)
+
+
+
+def connect_cassandra():
+    cluster = Cluster()
+    session = cluster.connect('mykeyspace')
+    return session
+
+
+def get_events():
+    f1 =  open('page.txt','w')
+    f2 = open('error.txt','w')
+    url_search = "http://api.eventful.com/json/events/search"
+    url_tags = "http://api.eventful.com/json/events/tags/list"
+    parsed_url = urlparse(url_search)
+    parsed_url_2 = urlparse(url_tags)
+    q = {'count_only':True,'app_key':'SvV5KrR9B3PMS9HB','location':'US','date':'all'}
+    qs = urllib.urlencode(q)
+    final_url = urlunparse((parsed_url.scheme,parsed_url.netloc,parsed_url.path,parsed_url.params,qs,parsed_url.fragment))
+    print final_url
+    res = requests.get(final_url)
+    count = res.json()['total_items']
+    print count
+    page_size = 100
+    total_pages = int(math.ceil(float(count)/float(page_size)))
+    print total_pages
+
+
+    f1.write('LATEST PAGES FETCHED\n')
+    f2.write('ERRORS\n')
+
+
+
+    for pg in xrange(214,total_pages+1):
+        try:
+            q = {'page_size':100,'page_number':pg,'app_key':'SvV5KrR9B3PMS9HB','location':'US','date':'all','include':'categories,links,subcategories,popularity,tickets,price','image_sizes':'small,medium,large'}
+            qs = urllib.urlencode(q)
+            final_url = urlunparse((parsed_url.scheme,parsed_url.netloc,parsed_url.path,parsed_url.params,qs,parsed_url.fragment))
+            print final_url
+            res = requests.get(final_url)
+            if res.status_code == 200:
+                f1.write(str(pg)+'\n')
+                events = res.json()['events']['event']
+                for event in events:
+                    print '\n'
+                    print 'id:',event['id']
+                    print 'Title:',event['title']
+                    print 'Description w/o Parsing:',event['description']
+                    descrip = ""
+                    if event['description'] is not None:
+                        soup = BeautifulSoup(event['description'],'html.parser')
+                        print 'Description w/ Parsing:',soup.get_text()
+                        descrip = soup.get_text()
+                    print 'Categories:',event['categories']['category']
+                    cats = []
+                    for cat in event['categories']['category']:
+                        cats.append(cat['id'])
+                    print 'category field:',cats
+
+                    if event['links']:
+                        lks = {}
+                        for lk in event['links']['link']:
+                            lks[lk['url']] = lk['type']
+                        print 'links field:',lks
+
+                    imgs = []
+                    if event['image']:
+                        if 'small' in event['image'].keys():
+                            imgs.append(event['image']['small']['url'])
+                        if 'medium' in event['image'].keys():
+                            imgs.append(event['image']['medium']['url'])
+                        if 'large' in event['image'].keys():
+                            imgs.append(event['image']['large']['url'])
+
+                    print 'images field:',imgs
+                    pfrs = []
+                    if event['performers']:
+                        if type(event['performers']['performer']) == type({}):
+                            pfrs.append(event['performers']['performer']['name'])
+                        elif type(event['performers']['performer']) == type([]):
+                            for pfr in event['performers']['performer']:
+                                pfrs.append(pfr['name'])
+                        print 'performers field:',pfrs
+
+                    q2 = {'app_key':'SvV5KrR9B3PMS9HB','id':event['id']}
+                    qs2= urllib.urlencode(q2)
+                    final_url_2 = urlunparse((parsed_url_2.scheme,parsed_url_2.netloc,parsed_url_2.path,parsed_url_2.params,qs2,parsed_url_2.fragment))
+                    res2 = requests.get(final_url_2)
+                    if res2.status_code == 200:
+                        if 'tags' in res2.json().keys() and 'tag' in res2.json()['tags'].keys():
+                            tags = res2.json()['tags']['tag']
+                            tgs = []
+                            if type(tags) == type([]):
+                                for tag in tags:
+                                    if tag['id'] not in cats:
+                                        tgs.append(tag['id'])
+                            elif type(tags) == type({}):
+                                tgs.append(tags['id'])
+                            print 'Tags:',tags
+                            print 'tags field:',tgs
+                    start_time = datetime.strptime("9999-01-01 00:00:00","%Y-%m-%d %H:%M:%S")
+                    stop_time = datetime.strptime("9999-01-01 00:00:00","%Y-%m-%d %H:%M:%S")
+                    created = datetime.strptime("9999-01-01 00:00:00","%Y-%m-%d %H:%M:%S")
+                    modified = datetime.strptime("9999-01-01 00:00:00","%Y-%m-%d %H:%M:%S")
+                    if event['start_time'] is not None:
+                        start_time = datetime.strptime(event['start_time'],"%Y-%m-%d %H:%M:%S")
+                    print 'start_time:',start_time
+                    if event['stop_time'] is not None:
+                        stop_time = datetime.strptime(event['stop_time'],"%Y-%m-%d %H:%M:%S")
+                    print 'stop_time:',stop_time
+                    if event['created'] is not None:
+                        created =  datetime.strptime(event['created'],"%Y-%m-%d %H:%M:%S")
+                    print 'created:',created
+                    if event['modified'] is not None:
+                        modified = datetime.strptime(event['modified'],"%Y-%m-%d %H:%M:%S")
+                    print 'modified:',modified
+
+                    Events.create(eventid=event['id'],title=event['title'],description=descrip,start_time=start_time,stop_time=stop_time,created=created,modified=modified,venue_id=event['venue_id'],venue_name=event['venue_name'],venue_address=event['venue_address'],city_name=event['city_name'],region_name=event['region_name'],postal_code=event['postal_code'],country_name=event['country_name'],latitude=event['latitude'],longitude=event['longitude'],categories=cats,tags=tgs,links=lks,images=imgs,performers=pfrs)
+
+                    time.sleep(1)
+                    print '\n'
+        except:
+            print 'Error:',sys.exc_info()
+            f2.write('Error:'+str(sys.exc_info())+'\n')
+            continue
+
+
+
+if __name__ == '__main__':
+    connection.setup(['127.0.0.1'],"events")
+    sync_table(Events)
+    get_events()
